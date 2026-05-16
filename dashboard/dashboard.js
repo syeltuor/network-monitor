@@ -1,7 +1,7 @@
 // Network Monitor Dashboard JavaScript
 // Configuration - update this with your S3 bucket details
 const CONFIG = {
-    bucketName: 'yeltuor-network-monitor-bucket',
+    bucketName: 'xxx-network-monitor-bucket',
     region: 'eu-west-2',
     baseUrl: null // Will be set automatically
 };
