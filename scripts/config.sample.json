@@ -1,6 +1,6 @@
 {
-  "location": "CulverLane",
-  "s3_bucket": "yeltuor-network-monitor-bucket",
+  "location": "MyLocation",
+  "s3_bucket": "your-s3-bucket-name",
   "s3_region": "eu-west-2",
   "ping_targets": [
     {
@@ -24,7 +24,11 @@
       "host": "google.com"
     }
   ],
-  "ping_count": 4,
-  "speedtest_enabled": true,
-  "local_data_dir": "/data"
+  "ping_count": 10,
+  "ping_parallel": true,
+  "continuous_mode": true,
+  "continuous_interval_seconds": 50,
+  "speedtest_enabled": false,
+  "speedtest_interval_minutes": 60,
+  "local_data_dir": "../network_monitor_data"
 }

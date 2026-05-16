@@ -1,6 +1,10 @@
 # Environment / secrets
 .env
 
+# Scripts config (contains real hostnames/bucket names — use config.sample.json as template)
+scripts/*.json
+!scripts/config.sample.json
+
 # Network monitor data (runtime output, not source code)
 network_monitor_data/
 
