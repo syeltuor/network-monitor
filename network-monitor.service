@@ -1,0 +1,20 @@
+[Unit]
+Description=Network Monitor - Continuous Ping and Speed Test
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/network_monitor/scripts
+ExecStart=/usr/bin/python3 /home/pi/network_monitor/scripts/network_monitor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (if needed)
+# Environment="AWS_DEFAULT_REGION=eu-west-2"
+
+[Install]
+WantedBy=multi-user.target

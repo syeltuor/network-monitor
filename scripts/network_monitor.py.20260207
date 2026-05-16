@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""
+Network Monitor for Raspberry Pi
+Performs ping tests and speed tests, uploads results to S3
+"""
+
+import json
+import subprocess
+import time
+from datetime import datetime, timedelta, timezone
+import boto3
+from pathlib import Path
+import statistics
+import sys
+import os
+
+# Load configuration from file
+def load_config():
+    """Load configuration from config.json or use defaults"""
+    config_path = Path(__file__).parent / "config.json"
+    
+    # Default configuration
+    default_config = {
+        "location": "home",
+        "s3_bucket": "your-network-monitor-bucket",
+        "s3_region": "us-east-1",
+        "ping_targets": [
+            {"name": "Router", "host": "192.168.1.1"},
+            {"name": "Google DNS", "host": "8.8.8.8"},
+            {"name": "Cloudflare DNS", "host": "1.1.1.1"},
+            {"name": "Google", "host": "google.com"}
+        ],
+        "ping_count": 4,
+        "speedtest_enabled": True,
+        "local_data_dir": "/home/pi/network_monitor_data"
+    }
+    
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                print(f"Loaded configuration from {config_path}")
+                return config
+        except Exception as e:
+            print(f"Error loading config.json: {e}")
+            print("Using default configuration")
+            return default_config
+    else:
+        print(f"config.json not found at {config_path}")
+        print("Using default configuration")
+        return default_config
+
+CONFIG = load_config()
+
+
+def ping_test(host, count=4):
+    """Perform ping test and return results"""
+    try:
+        result = subprocess.run(
+            ["ping", "-c", str(count), "-W", "2", host],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        if result.returncode == 0:
+            lines = result.stdout.split('\n')
+            # Parse statistics line: "rtt min/avg/max/mdev = 1.234/2.345/3.456/0.123 ms"
+            for line in lines:
+                if "rtt min/avg/max/mdev" in line or "round-trip" in line:
+                    stats = line.split('=')[1].strip().split()[0]
+                    min_ms, avg_ms, max_ms, mdev = stats.split('/')
+                    
+                    # Parse packet loss
+                    packet_loss = 0
+                    for l in lines:
+                        if "packet loss" in l:
+                            packet_loss = float(l.split('%')[0].split()[-1])
+                            break
+                    
+                    return {
+                        "success": True,
+                        "min_ms": float(min_ms),
+                        "avg_ms": float(avg_ms),
+                        "max_ms": float(max_ms),
+                        "packet_loss": packet_loss
+                    }
+        
+        return {"success": False, "error": "No response"}
+    
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Timeout"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def speedtest():
+    """Perform speed test using speedtest-cli"""
+    try:
+        result = subprocess.run(
+            ["speedtest-cli", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return {
+                "success": True,
+                "download_mbps": round(data["download"] / 1_000_000, 2),
+                "upload_mbps": round(data["upload"] / 1_000_000, 2),
+                "ping_ms": data["ping"],
+                "server": data["server"]["sponsor"],
+                "server_location": f"{data['server']['name']}, {data['server']['country']}"
+            }
+        
+        return {"success": False, "error": "Speed test failed"}
+    
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Timeout"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def run_tests():
+    """Run all network tests"""
+    timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    
+    print(f"Running tests at {timestamp} for location: {CONFIG['location']}")
+    
+    # Ping tests
+    ping_results = []
+    for target in CONFIG["ping_targets"]:
+        print(f"  Pinging {target['name']} ({target['host']})...")
+        result = ping_test(target["host"], CONFIG["ping_count"])
+        ping_results.append({
+            "name": target["name"],
+            "host": target["host"],
+            **result
+        })
+    
+    # Speed test
+    speed_result = None
+    if CONFIG["speedtest_enabled"]:
+        print("  Running speed test...")
+        speed_result = speedtest()
+    
+    return {
+        "timestamp": timestamp,
+        "location": CONFIG["location"],
+        "ping_tests": ping_results,
+        "speed_test": speed_result
+    }
+
+
+def save_local(data):
+    """Save data locally"""
+    data_dir = Path(CONFIG["local_data_dir"])
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save individual result with location
+    now = datetime.now(timezone.utc)
+    date_str = now.strftime("%Y/%m/%d")
+    location_dir = data_dir / CONFIG["location"] / date_str
+    location_dir.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    result_file = location_dir / f"result_{timestamp}.json"
+    
+    with open(result_file, 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    return result_file
+
+
+def upload_to_s3(data):
+    """Upload results to S3"""
+    try:
+        s3 = boto3.client('s3', region_name=CONFIG["s3_region"])
+        
+        # Upload individual result with location prefix
+        now = datetime.now(timezone.utc)
+        date_str = now.strftime("%Y/%m/%d")
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        location = CONFIG["location"]
+        key = f"results/{location}/{date_str}/result_{timestamp}.json"
+        
+        s3.put_object(
+            Bucket=CONFIG["s3_bucket"],
+            Key=key,
+            Body=json.dumps(data),
+            ContentType="application/json"
+        )
+        
+        print(f"  Uploaded to s3://{CONFIG['s3_bucket']}/{key}")
+        
+        # Update rolling summaries
+        update_summaries(s3, data)
+        
+        return True
+    
+    except Exception as e:
+        print(f"  Error uploading to S3: {e}")
+        return False
+
+
+def update_summaries(s3, new_data):
+    """Update rolling summary files (24h, 7d, 30d)"""
+    now = datetime.now(timezone.utc)
+    location = CONFIG["location"]
+    
+    for period, days in [("24h", 1), ("7d", 7), ("30d", 30)]:
+        try:
+            # Try to get existing summary for this location
+            try:
+                response = s3.get_object(
+                    Bucket=CONFIG["s3_bucket"],
+                    Key=f"summaries/{location}/summary_{period}.json"
+                )
+                summary = json.loads(response['Body'].read())
+            except s3.exceptions.NoSuchKey:
+                summary = {"location": location, "results": []}
+            
+            # Add new data
+            summary["results"].append(new_data)
+            
+            # Filter to keep only data within the period
+            cutoff = now - timedelta(days=days)
+            summary["results"] = [
+                r for r in summary["results"]
+                if datetime.fromisoformat(r["timestamp"].replace('Z', '+00:00')).replace(tzinfo=timezone.utc) > cutoff
+            ]
+            
+            # Upload updated summary
+            s3.put_object(
+                Bucket=CONFIG["s3_bucket"],
+                Key=f"summaries/{location}/summary_{period}.json",
+                Body=json.dumps(summary),
+                ContentType="application/json"
+            )
+            
+            print(f"  Updated {period} summary ({len(summary['results'])} results)")
+        
+        except Exception as e:
+            print(f"  Error updating {period} summary: {e}")
+    
+    # Update locations list
+    update_locations_list(s3)
+
+
+def update_locations_list(s3):
+    """Update the list of available locations"""
+    try:
+        # List all location folders in summaries/
+        response = s3.list_objects_v2(
+            Bucket=CONFIG["s3_bucket"],
+            Prefix="summaries/",
+            Delimiter="/"
+        )
+        
+        locations = []
+        if 'CommonPrefixes' in response:
+            for prefix in response['CommonPrefixes']:
+                location = prefix['Prefix'].replace('summaries/', '').replace('/', '')
+                if location:
+                    locations.append(location)
+        
+        # Upload locations list
+        s3.put_object(
+            Bucket=CONFIG["s3_bucket"],
+            Key="locations.json",
+            Body=json.dumps({"locations": sorted(locations)}),
+            ContentType="application/json"
+        )
+        
+        print(f"  Updated locations list: {locations}")
+    
+    except Exception as e:
+        print(f"  Error updating locations list: {e}")
+
+
+def main():
+    """Main execution"""
+    print("=" * 50)
+    print("Network Monitor Starting")
+    print("=" * 50)
+    
+    # Run tests
+    results = run_tests()
+    
+    # Save locally
+    local_file = save_local(results)
+    print(f"  Saved locally to {local_file}")
+    
+    # Upload to S3
+    upload_to_s3(results)
+    
+    print("=" * 50)
+    print("Tests completed")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    main()

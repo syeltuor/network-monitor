@@ -1,0 +1,19 @@
+services:
+  network-monitor:
+    build: .
+    container_name: network-monitor
+    restart: unless-stopped
+    volumes:
+      - ./scripts/network_monitor.py:/app/network_monitor.py:ro
+      - ./scripts/config.json:/app/config.json:ro
+      - ./network_monitor_data:/data
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+    network_mode: host
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,15 @@
+network_monitor_data/
+*.log
+.env
+.git
+.gitignore
+README.md
+DOCKER_SETUP.md
+MULTI_LOCATION_SETUP.md
+setup_aws.sh
+install_pi.sh
+index.html
+dashboard.js
+__pycache__/
+*.pyc
+.DS_Store
